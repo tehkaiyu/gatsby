@@ -1,0 +1,149 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`Process YAML nodes correctly correctly creates a node from JSON which is a single object 1`] = `
+Array [
+  Array [
+    Object {
+      "blue": true,
+      "children": Array [],
+      "funny": "yup",
+      "id": "uuid-from-gatsby",
+      "internal": Object {
+        "contentDigest": "73901821b17d5aa9dd6026181f73b64c",
+        "type": "BarYaml",
+      },
+      "parent": "whatever",
+    },
+  ],
+]
+`;
+
+exports[`Process YAML nodes correctly correctly creates a node from JSON which is a single object 2`] = `
+Array [
+  Array [
+    Object {
+      "child": Object {
+        "blue": true,
+        "children": Array [],
+        "funny": "yup",
+        "id": "uuid-from-gatsby",
+        "internal": Object {
+          "contentDigest": "73901821b17d5aa9dd6026181f73b64c",
+          "type": "BarYaml",
+        },
+        "parent": "whatever",
+      },
+      "parent": Object {
+        "children": Array [],
+        "content": "blue: true
+funny: yup
+",
+        "dir": "/tmp/bar/",
+        "id": "whatever",
+        "internal": Object {
+          "contentDigest": "whatever",
+          "mediaType": "text/yaml",
+        },
+        "name": "test",
+        "parent": "SOURCE",
+      },
+    },
+  ],
+]
+`;
+
+exports[`Process YAML nodes correctly correctly creates nodes from JSON which is an array of objects 1`] = `
+Array [
+  Array [
+    Object {
+      "blue": true,
+      "children": Array [],
+      "funny": "yup",
+      "id": "uuid-from-gatsby",
+      "internal": Object {
+        "contentDigest": "73901821b17d5aa9dd6026181f73b64c",
+        "type": "TestYaml",
+      },
+      "parent": "whatever",
+    },
+  ],
+  Array [
+    Object {
+      "blue": false,
+      "children": Array [],
+      "funny": "nope",
+      "id": "uuid-from-gatsby",
+      "internal": Object {
+        "contentDigest": "f624311d932d73dcd416d2a8bea2b67d",
+        "type": "TestYaml",
+      },
+      "parent": "whatever",
+    },
+  ],
+]
+`;
+
+exports[`Process YAML nodes correctly correctly creates nodes from JSON which is an array of objects 2`] = `
+Array [
+  Array [
+    Object {
+      "child": Object {
+        "blue": true,
+        "children": Array [],
+        "funny": "yup",
+        "id": "uuid-from-gatsby",
+        "internal": Object {
+          "contentDigest": "73901821b17d5aa9dd6026181f73b64c",
+          "type": "TestYaml",
+        },
+        "parent": "whatever",
+      },
+      "parent": Object {
+        "children": Array [],
+        "content": "- blue: true
+  funny: yup
+- blue: false
+  funny: nope
+",
+        "id": "whatever",
+        "internal": Object {
+          "contentDigest": "whatever",
+          "mediaType": "text/yaml",
+        },
+        "name": "test",
+        "parent": "SOURCE",
+      },
+    },
+  ],
+  Array [
+    Object {
+      "child": Object {
+        "blue": false,
+        "children": Array [],
+        "funny": "nope",
+        "id": "uuid-from-gatsby",
+        "internal": Object {
+          "contentDigest": "f624311d932d73dcd416d2a8bea2b67d",
+          "type": "TestYaml",
+        },
+        "parent": "whatever",
+      },
+      "parent": Object {
+        "children": Array [],
+        "content": "- blue: true
+  funny: yup
+- blue: false
+  funny: nope
+",
+        "id": "whatever",
+        "internal": Object {
+          "contentDigest": "whatever",
+          "mediaType": "text/yaml",
+        },
+        "name": "test",
+        "parent": "SOURCE",
+      },
+    },
+  ],
+]
+`;

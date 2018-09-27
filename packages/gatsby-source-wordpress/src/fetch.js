@@ -1,0 +1,539 @@
+const querystring = require(`querystring`)
+const axios = require(`axios`)
+const _ = require(`lodash`)
+const minimatch = require(`minimatch`)
+const colorized = require(`./output-color`)
+const httpExceptionHandler = require(`./http-exception-handler`)
+const requestInQueue = require(`./request-in-queue`)
+
+/**
+ * High-level function to coordinate fetching data from a WordPress
+ * site.
+ */
+async function fetch({
+  baseUrl,
+  _verbose,
+  _siteURL,
+  _useACF,
+  _acfOptionPageIds,
+  _hostingWPCOM,
+  _auth,
+  _perPage,
+  _concurrentRequests,
+  _excludedRoutes,
+  typePrefix,
+  refactoredEntityTypes,
+}) {
+  // If the site is hosted on wordpress.com, the API Route differs.
+  // Same entity types are exposed (excepted for medias and users which need auth)
+  // but the data model contain slights variations.
+  let url
+  let _accessToken
+  if (_hostingWPCOM) {
+    url = `https://public-api.wordpress.com/wp/v2/sites/${baseUrl}`
+    _accessToken = await getWPCOMAccessToken(_auth)
+  } else {
+    url = `${_siteURL}/wp-json`
+  }
+
+  if (_verbose) {
+    console.time(`=END PLUGIN=====================================`)
+
+    console.log(
+      colorized.out(
+        `
+=START PLUGIN=====================================
+
+Site URL: ${_siteURL}
+Site hosted on Wordpress.com: ${_hostingWPCOM}
+Using ACF: ${_useACF}
+Using Auth: ${_auth.htaccess_user} ${_auth.htaccess_pass}
+Verbose output: ${_verbose}
+
+Mama Route URL: ${url}
+`,
+        colorized.color.Font.FgBlue
+      )
+    )
+  }
+
+  // Call the main API Route to discover the all the routes exposed on this API.
+  let allRoutes
+  try {
+    let options = {
+      method: `get`,
+      url: url,
+    }
+    if (_auth && (_auth.htaccess_user || _auth.htaccess_pass)) {
+      options.auth = {
+        username: _auth.htaccess_user,
+        password: _auth.htaccess_pass,
+      }
+    }
+    
+    if (_hostingWPCOM && _accessToken) {
+      options.headers = {
+        Authorization: `Bearer ${_accessToken}`,
+      }
+    }
+    
+    allRoutes = await axios(options)
+  } catch (e) {
+    httpExceptionHandler(e)
+  }
+
+  let entities = []
+
+  if (allRoutes) {
+    let validRoutes = getValidRoutes({
+      allRoutes,
+      url,
+      baseUrl,
+      _verbose,
+      _useACF,
+      _acfOptionPageIds,
+      _hostingWPCOM,
+      _excludedRoutes,
+      typePrefix,
+      refactoredEntityTypes,
+    })
+
+    if (_verbose) {
+      console.log(
+        colorized.out(
+          `
+Fetching the JSON data from ${validRoutes.length} valid API Routes...
+`,
+          colorized.color.Font.FgBlue
+        )
+      )
+    }
+
+    for (let route of validRoutes) {
+      entities = entities.concat(
+        await fetchData({
+          route,
+          _verbose,
+          _perPage,
+          _hostingWPCOM,
+          _auth,
+          _accessToken,
+          _concurrentRequests,
+        })
+      )
+      if (_verbose) console.log(``)
+    }
+
+    if (_verbose)
+      console.timeEnd(`=END PLUGIN=====================================`)
+  } else {
+    console.log(
+      colorized.out(`No routes to fetch. Ending.`, colorized.color.Font.FgRed)
+    )
+  }
+
+  return entities
+}
+
+/**
+ * Gets wordpress.com access token so it can fetch private data like medias :/
+ *
+ * @returns
+ */
+async function getWPCOMAccessToken(_auth) {
+  let result
+  const oauthUrl = `https://public-api.wordpress.com/oauth2/token`
+  try {
+    let options = {
+      url: oauthUrl,
+      method: `post`,
+      data: querystring.stringify({
+        client_secret: _auth.wpcom_app_clientSecret,
+        client_id: _auth.wpcom_app_clientId,
+        username: _auth.wpcom_user,
+        password: _auth.wpcom_pass,
+        grant_type: `password`,
+      }),
+    }
+    result = await axios(options)
+    result = result.data.access_token
+  } catch (e) {
+    httpExceptionHandler(e)
+  }
+
+  return result
+}
+
+/**
+ * Fetch the data from specified route url, using the auth provided.
+ *
+ * @param {any} route
+ * @param {any} createNode
+ */
+async function fetchData({
+  route,
+  _verbose,
+  _perPage,
+  _hostingWPCOM,
+  _auth,
+  _accessToken,
+  _concurrentRequests,
+}) {
+  const { type, url, optionPageId } = route
+
+  if (_verbose) {
+    console.log(
+      colorized.out(
+        `=== [ Fetching ${type} ] ===`,
+        colorized.color.Font.FgBlue
+      ),
+      url
+    )
+
+    console.time(`Fetching the ${type} took`)
+  }
+
+  let routeResponse = await getPages(
+    {
+      url,
+      _perPage,
+      _hostingWPCOM,
+      _auth,
+      _accessToken,
+      _verbose,
+      _concurrentRequests,
+    },
+    1
+  )
+
+  let entities = []
+  if (routeResponse) {
+    // Process entities to creating GraphQL Nodes.
+    if (Array.isArray(routeResponse)) {
+      routeResponse = routeResponse.map(r => {
+        return {
+          ...r,
+          ...(optionPageId ? { __acfOptionPageId: optionPageId } : {}),
+          __type: type,
+        }
+      })
+      entities = entities.concat(routeResponse)
+    } else {
+      routeResponse.__type = type
+      if (optionPageId) {
+        routeResponse.__acfOptionPageId = optionPageId
+      }
+      entities.push(routeResponse)
+    }
+
+    // WordPress exposes the menu items in meta links.
+    if (type == `wordpress__wp_api_menus_menus`) {
+      for (let menu of routeResponse) {
+        if (menu.meta && menu.meta.links && menu.meta.links.self) {
+          entities = entities.concat(
+            await fetchData({
+              route: { url: menu.meta.links.self, type: `${type}_items` },
+              _verbose,
+              _perPage,
+              _hostingWPCOM,
+              _auth,
+              _accessToken,
+            })
+          )
+        }
+      }
+    }
+    // TODO : Get the number of created nodes using the nodes in state.
+    let length
+    if (routeResponse && Array.isArray(routeResponse)) {
+      length = routeResponse.length
+    } else if (routeResponse && !Array.isArray(routeResponse)) {
+      length = Object.keys(routeResponse).length
+    }
+    console.log(
+      colorized.out(
+        ` -> ${type} fetched : ${length}`,
+        colorized.color.Font.FgGreen
+      )
+    )
+  }
+
+  if (_verbose) {
+    console.timeEnd(`Fetching the ${type} took`)
+  }
+
+  return entities
+}
+
+/**
+ * Get the pages of data
+ *
+ * @param {any} url
+ * @param {number} [page=1]
+ * @returns
+ */
+async function getPages(
+  {
+    url,
+    _perPage,
+    _hostingWPCOM,
+    _auth,
+    _accessToken,
+    _concurrentRequests,
+    _verbose,
+  },
+  page = 1
+) {
+  try {
+    let result = []
+
+    const getOptions = page => {
+      let o = {
+        method: `get`,
+        url: `${url}?${querystring.stringify({
+          per_page: _perPage,
+          page: page,
+        })}`,
+      }
+      if (_hostingWPCOM) {
+        o.headers = {
+          Authorization: `Bearer ${_accessToken}`,
+        }
+      } else {
+        o.auth = _auth
+          ? { username: _auth.htaccess_user, password: _auth.htaccess_pass }
+          : null
+      }
+      return o
+    }
+
+    // Initial request gets the first page of data
+    // but also the total count of objects, used for
+    // multiple concurrent requests (rather than waterfall)
+    const options = getOptions(page)
+    const { headers, data } = await axios(options)
+
+    result = result.concat(data)
+
+    // Some resources have no paging, e.g. `/types`
+    const wpTotal = headers[`x-wp-total`]
+
+    const total = parseInt(wpTotal)
+    const totalPages = parseInt(headers[`x-wp-totalpages`])
+
+    if (!wpTotal || totalPages <= 1) {
+      return result
+    }
+
+    if (_verbose) {
+      console.log(`
+Total entities : ${total}
+Pages to be requested : ${totalPages}`)
+    }
+
+    // We got page 1, now we want pages 2 through totalPages
+    const pageOptions = _.range(2, totalPages + 1).map(getPage =>
+      getOptions(getPage)
+    )
+
+    const pages = await requestInQueue(pageOptions, {
+      concurrent: _concurrentRequests,
+    })
+
+    const pageData = pages.map(page => page.data)
+    pageData.forEach(list => {
+      result = result.concat(list)
+    })
+
+    return result
+  } catch (e) {
+    return httpExceptionHandler(e)
+  }
+}
+
+/**
+ * Extract valid routes and format its data.
+ *
+ * @param {any} allRoutes
+ * @param {any} url
+ * @param {any} baseUrl
+ * @returns
+ */
+function getValidRoutes({
+  allRoutes,
+  url,
+  baseUrl,
+  _verbose,
+  _useACF,
+  _acfOptionPageIds,
+  _hostingWPCOM,
+  _excludedRoutes,
+  typePrefix,
+  refactoredEntityTypes,
+}) {
+  let validRoutes = []
+  let acfRestVersion = 3
+  for (let key of Object.keys(allRoutes.data.routes)) {
+    if (_verbose) console.log(`Route discovered :`, key)
+    let route = allRoutes.data.routes[key]
+
+    // A valid route exposes its _links (for now)
+    if (route._links) {
+      const entityType = getRawEntityType(route)
+
+      // Excluding the "technical" API Routes
+      const excludedTypes = [
+        undefined,
+        `v2`,
+        `v3`,
+        `1.0`,
+        `2.0`,
+        `embed`,
+        `proxy`,
+        ``,
+        baseUrl,
+      ]
+
+      const routePath = getRoutePath(url, route._links.self)
+      if (excludedTypes.includes(entityType)) {
+        // Grab ACF Version from routes
+        acfRestVersion =
+          key === `/acf/${entityType}` ? entityType.substr(1) : acfRestVersion
+        if (_verbose)
+          console.log(
+            colorized.out(`Invalid route.`, colorized.color.Font.FgRed)
+          )
+      } else if (
+        _excludedRoutes.some(excludedRoute =>
+          minimatch(routePath, excludedRoute)
+        )
+      ) {
+        if (_verbose)
+          console.log(
+            colorized.out(
+              `Excluded route from excludedRoutes pattern.`,
+              colorized.color.Font.FgYellow
+            )
+          )
+      } else {
+        if (_verbose)
+          console.log(
+            colorized.out(
+              `Valid route found. Will try to fetch.`,
+              colorized.color.Font.FgGreen
+            )
+          )
+
+        const manufacturer = getManufacturer(route)
+
+        let rawType = ``
+        if (manufacturer === `wp`) {
+          rawType = `${typePrefix}${entityType}`
+        }
+
+        let validType
+        switch (rawType) {
+          case `${typePrefix}posts`:
+            validType = refactoredEntityTypes.post
+            break
+          case `${typePrefix}pages`:
+            validType = refactoredEntityTypes.page
+            break
+          case `${typePrefix}tags`:
+            validType = refactoredEntityTypes.tag
+            break
+          case `${typePrefix}categories`:
+            validType = refactoredEntityTypes.category
+            break
+          default:
+            validType = `${typePrefix}${manufacturer.replace(
+              /-/g,
+              `_`
+            )}_${entityType.replace(/-/g, `_`)}`
+            break
+        }
+        validRoutes.push({ url: route._links.self, type: validType })
+      }
+    } else {
+      if (_verbose)
+        console.log(colorized.out(`Invalid route.`, colorized.color.Font.FgRed))
+    }
+  }
+
+  if (_verbose)
+    console.log(
+      colorized.out(
+        `Detected ACF to REST version: v${acfRestVersion}.`,
+        colorized.color.Font.FgGreen
+      )
+    )
+
+  if (_useACF) {
+    // The OPTIONS ACF API Route is not giving a valid _link so let`s add it manually
+    // and pass ACF option page ID
+    // ACF to REST v3 requires options/options
+    let optionsRoute = acfRestVersion == 3 ? `options/options/` : `options/`
+    validRoutes.push({
+      url: `${url}/acf/v${acfRestVersion}/${optionsRoute}`,
+      type: `${typePrefix}acf_options`,
+    })
+    // ACF to REST V2 does not allow ACF Option Page ID specification
+    if (acfRestVersion == 3) {
+      _acfOptionPageIds.forEach(function(acfOptionPageId) {
+        validRoutes.push({
+          url: `${url}/acf/v3/options/${acfOptionPageId}`,
+          type: `${typePrefix}acf_options`,
+          optionPageId: acfOptionPageId,
+        })
+      })
+    }
+    if (_verbose)
+      console.log(
+        colorized.out(
+          `Added ACF Options route(s).`,
+          colorized.color.Font.FgGreen
+        )
+      )
+    if (_hostingWPCOM) {
+      // TODO : Need to test that out with ACF on Wordpress.com hosted site. Need a premium account on wp.com to install extensions.
+      if (_verbose)
+        console.log(
+          colorized.out(
+            `The ACF options pages is untested under wordpress.com hosting. Please let me know if it works.`,
+            colorized.color.Effect.Blink
+          )
+        )
+    }
+  }
+
+  return validRoutes
+}
+
+/**
+ * Extract the raw entity type from route
+ *
+ * @param {any} route
+ */
+const getRawEntityType = route =>
+  route._links.self.substring(
+    route._links.self.lastIndexOf(`/`) + 1,
+    route._links.self.length
+  )
+
+/**
+ * Extract the route path for an endpoint
+ *
+ * @param {any} baseUrl The base site URL that should be removed
+ * @param {any} fullUrl The full URL to retrieve the route path from
+ */
+const getRoutePath = (baseUrl, fullUrl) => fullUrl.replace(baseUrl, ``)
+
+/**
+ * Extract the route manufacturer
+ *
+ * @param {any} route
+ */
+const getManufacturer = route =>
+  route.namespace.substring(0, route.namespace.lastIndexOf(`/`))
+
+module.exports = fetch
